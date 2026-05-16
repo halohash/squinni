@@ -1,64 +1,88 @@
 import http from "http";
-import { WebSocketServer, WebSocket } from "ws";
 
 const TARGET = "wss://2s4.me/m4k/";
 
 const server = http.createServer((req, res) => {
-  res.writeHead(200, { "Content-Type": "text/plain" });
-  res.end("WebSocket mirror is running.");
-});
+  if (
+    req.headers.upgrade &&
+    req.headers.upgrade.toLowerCase() === "websocket"
+  ) {
+    const targetUrl = new URL(TARGET);
 
-const wss = new WebSocketServer({ server });
+    const upstreamHeaders = [
+      `GET ${targetUrl.pathname}${targetUrl.search} HTTP/1.1`,
+      `Host: ${targetUrl.host}`,
+      "Upgrade: websocket",
+      "Connection: Upgrade",
+      `Sec-WebSocket-Key: ${req.headers["sec-websocket-key"]}`,
+      `Sec-WebSocket-Version: ${req.headers["sec-websocket-version"] || "13"}`
+    ];
 
-wss.on("connection", (client, req) => {
-  const headers = {};
+    if (req.headers.origin) {
+      upstreamHeaders.push(`Origin: ${req.headers.origin}`);
+    }
 
-  if (req.headers["user-agent"]) {
-    headers["user-agent"] = req.headers["user-agent"];
+    const upstream = connectTlsSocket(targetUrl.hostname, 443, () => {
+      upstream.write(upstreamHeaders.join("\r\n") + "\r\n\r\n");
+    });
+
+    server.emit("connection-mirror", req.socket, upstream);
+    return;
   }
 
-  const upstream = new WebSocket(TARGET, {
-    headers
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("WebSocket mirror running");
+});
+
+server.on("connection-mirror", (client, upstream) => {
+  let handshakeDone = false;
+
+  upstream.on("data", chunk => {
+    if (!handshakeDone) {
+      const response = chunk.toString();
+
+      if (response.includes("101")) {
+        handshakeDone = true;
+        client.write(chunk);
+
+        client.pipe(upstream);
+        upstream.pipe(client);
+      } else {
+        client.end();
+        upstream.end();
+      }
+
+      return;
+    }
   });
 
-  let closed = false;
-
-  const cleanup = () => {
-    if (closed) return;
-    closed = true;
-
-    try {
-      client.close();
-    } catch {}
-
-    try {
-      upstream.close();
-    } catch {}
+  const close = () => {
+    client.destroy();
+    upstream.destroy();
   };
 
-  upstream.on("open", () => {
-    client.on("message", (data, isBinary) => {
-      if (upstream.readyState === WebSocket.OPEN) {
-        upstream.send(data, { binary: isBinary });
-      }
-    });
+  client.on("error", close);
+  upstream.on("error", close);
 
-    upstream.on("message", (data, isBinary) => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(data, { binary: isBinary });
-      }
-    });
-  });
-
-  client.on("close", cleanup);
-  upstream.on("close", cleanup);
-
-  client.on("error", cleanup);
-  upstream.on("error", cleanup);
+  client.on("close", close);
+  upstream.on("close", close);
 });
+
+function connectTlsSocket(host, port, callback) {
+  const tls = require("tls");
+
+  return tls.connect(
+    {
+      host,
+      port,
+      servername: host
+    },
+    callback
+  );
+}
 
 const PORT = process.env.PORT || 8788;
 
 server.listen(PORT, () => {
-  console.log(`WebSocket mirror running on port ${PORT}`);
+  console.log(`Mirror listening on ${PORT}`);
 });
