@@ -2,9 +2,7 @@ export async function onRequest(context) {
   const upgradeHeader = context.request.headers.get("Upgrade");
 
   if (upgradeHeader !== "websocket") {
-    return new Response("WebSocket mirror running", {
-      status: 200
-    });
+    return new Response("WebSocket mirror running");
   }
 
   const pair = new WebSocketPair();
@@ -16,21 +14,25 @@ export async function onRequest(context) {
 
   const upstream = new WebSocket("wss://2s4.me/m4k/");
 
-  upstream.addEventListener("open", () => {
-    server.addEventListener("message", event => {
-      if (upstream.readyState === 1) {
-        upstream.send(event.data);
-      }
-    });
+  let upstreamOpen = false;
 
-    upstream.addEventListener("message", event => {
-      if (server.readyState === 1) {
-        server.send(event.data);
-      }
-    });
+  upstream.addEventListener("open", () => {
+    upstreamOpen = true;
   });
 
-  const closeBoth = () => {
+  server.addEventListener("message", event => {
+    if (upstreamOpen) {
+      upstream.send(event.data);
+    }
+  });
+
+  upstream.addEventListener("message", event => {
+    try {
+      server.send(event.data);
+    } catch {}
+  });
+
+  const closeSockets = () => {
     try {
       upstream.close();
     } catch {}
@@ -40,11 +42,11 @@ export async function onRequest(context) {
     } catch {}
   };
 
-  server.addEventListener("close", closeBoth);
-  upstream.addEventListener("close", closeBoth);
+  server.addEventListener("close", closeSockets);
+  upstream.addEventListener("close", closeSockets);
 
-  server.addEventListener("error", closeBoth);
-  upstream.addEventListener("error", closeBoth);
+  server.addEventListener("error", closeSockets);
+  upstream.addEventListener("error", closeSockets);
 
   return new Response(null, {
     status: 101,
